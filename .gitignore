@@ -5,7 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
-supabase/config.toml
+supabase
 # Virtual environments
 .venv
 uv.lock
