@@ -5,8 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
-supabase
+.env
 # Virtual environments
 .venv
 uv.lock
-.env
