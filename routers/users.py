@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from database import supabase
+from storage import supabase
 
 router = APIRouter(
     tags=["users"]

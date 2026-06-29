@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from database import supabase, s3_client, BUCKET_NAME
+from storage import supabase, s3_client, BUCKET_NAME
 from auth import get_current_user
 import uuid
 
@@ -13,6 +13,8 @@ class FileUploadRequest(BaseModel):
     file_size: int
     file_type: str
 
+class UrlRequest(BaseModel):
+    url: str
 
 class FileConfirmRequest(BaseModel):
     s3_key: str
@@ -91,27 +93,110 @@ async def get_upload_url(
 @router.post("/api/projects/{project_id}/files/confirm")
 async def confirm_file_upload(
     project_id: str,
-    file_request: FileConfirmRequest,
+    confirm_request: FileConfirmRequest,
     clerk_id: str = Depends(get_current_user)
 ):
-    try:
-        project_result = supabase.table("projects").select("id").eq("id", project_id).eq("clerk_id", clerk_id).execute()
-        if not project_result.data:
-            raise HTTPException(status_code=404, detail="Project not found")
+    try: 
+        s3_key = confirm_request.s3_key
 
-        document_result = supabase.table("project_documents").update({
+        if not s3_key:
+            raise HTTPException(status_code=400, detail="s3_key required")
+        result = supabase.table("project_documents").update({
             "processing_status": "queued"
-        }).eq("project_id", project_id).eq("clerk_id", clerk_id).eq("s3_key", file_request.s3_key).execute()
+        }).eq("s3_key", s3_key).eq("project_id", project_id).eq("clerk_id", clerk_id).execute()
 
-        if not document_result.data:
-            raise HTTPException(status_code=404, detail="Document not found")
+        if not result.data:
+            raise HTTPException(status_code=400, detail="Document not found")
+        
+        document = result.data[0]
 
         return {
-            "message": "File upload confirmed",
-            "data": document_result.data[0],
+            "message": "Upload confirmed, processing started with Celery", 
+            "data": document
         }
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to confirm file upload: {str(e)}")
+        raise HTTPException(status_code=500, detail = f"Failed to confirm upload: {str(e)}")
+
+
+@router.post("/api/projects/{project_id}/urls")
+async def add_website_url(
+    project_id: str, 
+    url_request: UrlRequest, 
+    clerk_id: str = Depends(get_current_user)
+):
+    try:
+        url = url_request.url.strip()
+        if not url.startswith(('http://', 'https://')):
+            url = "https://" + url
+
+        result = supabase.table("project_documents").insert({
+            "project_id": project_id,
+            'filename': url,
+            's3_key': "",
+            'file_size': 0,
+            'file_type': 'text/html',
+            'processing_status': 'queued',
+            'clerk_id': clerk_id, 
+            "source_url": url, 
+            "source_type": "url"
+        }).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to create URL record")
+
+        return {
+            "message": "URL added successfully, processing started", 
+            "data": result.data[0]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to add URL: {str(e)}")
+
+@router.delete("/api/projects/{project_id}/files/{file_id}")
+async def delete_file(
+    project_id: str,
+    file_id: str,
+    clerk_id: str = Depends(get_current_user)
+):
+    try:
+        result = (supabase.table("project_documents")
+            .select("*")
+            .eq("id", file_id)
+            .eq("clerk_id", clerk_id)
+            .eq("project_id", project_id)
+            .execute()
+        )
+        if not result.data:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        file_record = result.data[0]
+        s3_key = file_record["s3_key"]
+
+        if s3_key:
+            try:
+                s3_client.delete_object(Bucket=BUCKET_NAME, Key=s3_key)
+            except Exception as e:
+                print(f"Failed to delete from s3: {e}")
+        
+        result = (
+            supabase.table("project_documents")
+            .delete()
+            .eq("id", file_id)
+            .eq("clerk_id", clerk_id)
+            .eq("project_id", project_id)
+            .execute()
+        )
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to delete")
+
+        return {
+            "message": "File deleted successfully",
+            "data": result.data[0]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete: {str(e)}")
