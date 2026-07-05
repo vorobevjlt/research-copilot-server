@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from tasks import process_document
 from storage import supabase, s3_client, BUCKET_NAME
 from auth import get_current_user
 import uuid
@@ -101,6 +102,7 @@ async def confirm_file_upload(
 
         if not s3_key:
             raise HTTPException(status_code=400, detail="s3_key required")
+
         result = supabase.table("project_documents").update({
             "processing_status": "queued"
         }).eq("s3_key", s3_key).eq("project_id", project_id).eq("clerk_id", clerk_id).execute()
@@ -109,6 +111,12 @@ async def confirm_file_upload(
             raise HTTPException(status_code=400, detail="Document not found")
         
         document = result.data[0]
+        document_id = document["id"]
+        task_id = process_document.delay(document_id).id
+
+        result = supabase.table("project_documents").update({
+            "task_id": task_id
+        }).eq("id", document_id).execute()
 
         return {
             "message": "Upload confirmed, processing started with Celery", 
@@ -146,6 +154,15 @@ async def add_website_url(
 
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to create URL record")
+
+        document = result.data[0]
+        document_id = document["id"]
+        task_id = process_document.delay(document_id).id
+
+        result = supabase.table("project_documents").update({
+            "task_id": task_id
+        }).eq("id", document_id).execute()
+
 
         return {
             "message": "URL added successfully, processing started", 
