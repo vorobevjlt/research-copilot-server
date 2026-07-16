@@ -13,6 +13,7 @@ dependencies = [
     "langchain-community==0.3.27",
     "langchain-openai==0.3.28",
     "python-dotenv>=1.2.2",
+    "scrapingbee>=2.0.2",
     "supabase>=2.30.1",
     "unstructured[all-docs]==0.18.11",
     "uvicorn>=0.48.0",

@@ -55,7 +55,7 @@ def create_project(
 
         settings_result = supabase.table("project_settings").insert({
             "project_id": project_id,
-            "embedding_model": "text_embedding-3-large",
+            "embedding_model": "text-embedding-3-large",
             "rag_strategy": "basic",
             "agent_type": "agentic",
             "chunks_per_search": 10,
