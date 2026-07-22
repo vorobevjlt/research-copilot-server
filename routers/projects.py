@@ -29,16 +29,20 @@ def get_all_projects(clerk_id: str = Depends(get_current_user)):
     try:
         result = supabase.table('projects').select('*').eq('clerk_id', clerk_id).execute()
 
+        # Extract data safely
+        projects = result.data if result and hasattr(result, 'data') and result.data else []
+
         return {
-            "message": "Projects retrieved successfully",
-            "data": result.data
+            "message": "Projects retrieved successfully" if projects else "You have no projects yet",
+            "data": projects
         }
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed hard {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve projects: {str(e)}")
 
 @router.post("/api/projects")
 def create_project(
-    project: ProjectCreate, 
+    project: ProjectCreate,
     clerk_id: str = Depends(get_current_user)
     ):
     try:
@@ -47,7 +51,7 @@ def create_project(
             "description": project.description,
             "clerk_id": clerk_id
         }).execute()
-        if not project_result.data: 
+        if not project_result.data:
             raise HTTPException(status_code=500, detail=f"Faled create project not project_result.data")
 
         created_project = project_result.data[0]
@@ -89,7 +93,7 @@ def delete_project(
 
         if not project_result.data:
             raise HTTPException(status_code=404, detail=f"Project not found or access denied")
-        
+
         deleted_result = supabase.table("projects").delete().eq("id", project_id).eq("clerk_id", clerk_id).execute()
 
         if not deleted_result.data:
@@ -135,7 +139,7 @@ async def get_project_settings(
     project_id: str,
     clerk_id: str = Depends(get_current_user)
 ):
-    
+
     try:
         project_result = supabase.table("projects").select("id").eq("id", project_id).eq("clerk_id", clerk_id).execute()
         if not project_result.data:
@@ -170,7 +174,7 @@ async def update_project_settings(
     settings: ProjectSettings,
     clerk_id: str = Depends(get_current_user)
 ):
-    
+
     try:
         p_result = supabase.table("projects").select("id").eq("id", project_id).eq("clerk_id", clerk_id).execute()
         if not p_result.data:
@@ -184,7 +188,7 @@ async def update_project_settings(
                 status_code=404,
                 detail="Project not found or haven`t permision to update settings"
             )
-        
+
         return {
             "success": True,
             "message": "Settings updated",

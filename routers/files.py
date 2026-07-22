@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from tasks import process_document
 from storage import supabase, s3_client, BUCKET_NAME
 from auth import get_current_user
 import uuid
+import os
 
 router = APIRouter(
     tags=["files"]
@@ -19,6 +20,15 @@ class UrlRequest(BaseModel):
 
 class FileConfirmRequest(BaseModel):
     s3_key: str
+
+
+def enqueue_document(background_tasks: BackgroundTasks, document_id: str) -> str | None:
+    """Run locally without Redis; deployments can opt into a Celery worker."""
+    if os.getenv("DOCUMENT_PROCESSING_MODE", "background").lower() == "celery":
+        return process_document.delay(document_id).id
+
+    background_tasks.add_task(process_document.run, document_id)
+    return None
 
 @router.get("/api/projects/{project_id}/files")
 async def get_project_files(
@@ -95,6 +105,7 @@ async def get_upload_url(
 async def confirm_file_upload(
     project_id: str,
     confirm_request: FileConfirmRequest,
+    background_tasks: BackgroundTasks,
     clerk_id: str = Depends(get_current_user)
 ):
     try: 
@@ -112,11 +123,12 @@ async def confirm_file_upload(
         
         document = result.data[0]
         document_id = document["id"]
-        task_id = process_document.delay(document_id).id
+        task_id = enqueue_document(background_tasks, document_id)
 
-        result = supabase.table("project_documents").update({
-            "task_id": task_id
-        }).eq("id", document_id).execute()
+        if task_id:
+            supabase.table("project_documents").update({
+                "task_id": task_id
+            }).eq("id", document_id).execute()
 
         return {
             "message": "Upload confirmed, processing started with Celery", 
@@ -133,12 +145,20 @@ async def confirm_file_upload(
 async def add_website_url(
     project_id: str, 
     url_request: UrlRequest, 
+    background_tasks: BackgroundTasks,
     clerk_id: str = Depends(get_current_user)
 ):
     try:
         url = url_request.url.strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="Website URL is required")
         if not url.startswith(('http://', 'https://')):
             url = "https://" + url
+
+        project = (supabase.table("projects").select("id")
+            .eq("id", project_id).eq("clerk_id", clerk_id).execute())
+        if not project.data:
+            raise HTTPException(status_code=404, detail="Project not found")
 
         result = supabase.table("project_documents").insert({
             "project_id": project_id,
@@ -157,19 +177,60 @@ async def add_website_url(
 
         document = result.data[0]
         document_id = document["id"]
-        task_id = process_document.delay(document_id).id
+        task_id = enqueue_document(background_tasks, document_id)
 
-        result = supabase.table("project_documents").update({
-            "task_id": task_id
-        }).eq("id", document_id).execute()
+        if task_id:
+            result = supabase.table("project_documents").update({
+                "task_id": task_id
+            }).eq("id", document_id).execute()
+            document = result.data[0]
 
 
         return {
             "message": "URL added successfully, processing started", 
-            "data": result.data[0]
+            "data": document
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to add URL: {str(e)}")
+
+
+@router.get("/api/projects/{project_id}/files/{file_id}/chunks")
+async def get_document_chunks(
+    project_id: str,
+    file_id: str,
+    clerk_id: str = Depends(get_current_user),
+):
+    try:
+        document_result = (supabase.table("project_documents")
+            .select("id")
+            .eq("id", file_id)
+            .eq("project_id", project_id)
+            .eq("clerk_id", clerk_id)
+            .execute())
+
+        if not document_result.data:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        chunks_result = (supabase.table("document_chunks")
+            .select("*")
+            .eq("document_id", file_id)
+            .order("chunk_index")
+            .execute())
+
+        return {
+            "message": "Document chunks retrieved successfully",
+            "data": chunks_result.data or [],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get document chunks: {str(e)}",
+        )
+
 
 @router.delete("/api/projects/{project_id}/files/{file_id}")
 async def delete_file(
@@ -217,4 +278,3 @@ async def delete_file(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete: {str(e)}")
-
