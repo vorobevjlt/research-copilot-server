@@ -7,8 +7,8 @@ from src.routes.chatRoutes import router as chatRoutes
 
 # Create FastAPI app
 app = FastAPI(
-    title="Six-Figure AI Engineering API",
-    description="Backend API for Six-Figure AI Engineering application",
+    title="AI Engineering API",
+    description="Backend API",
     version="1.0.0",
 )
 
