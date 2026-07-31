@@ -40,29 +40,21 @@
 
 4. **Start All Services:**
 
-   You need to run **3 services** in separate terminal windows:
-
-   **Terminal 1: Start Redis 🟥**
+   Start Redis, the API server, and the Celery worker with one command:
 
    ```bash
-   sh start_redis.sh
+   ./start_all.sh
    ```
 
-   **Terminal 2: Start API Server 🟦**
+   On the first launch, the script runs
+   `.venv/bin/guardrails configure --disable-metrics` if Guardrails telemetry
+   has not already been disabled.
 
-   ```bash
-   sh start_server.sh
-   ```
+   The server will run on `http://localhost:8000`. Press `Ctrl+C` to stop all
+   services started by the launcher.
 
-   The server will run on `http://localhost:8000`
-
-   **Terminal 3: Start Celery Worker 🟩**
-
-   ```bash
-   sh start_worker.sh
-   ```
-
-   This processes background tasks (document ingestion, embeddings, etc.)
+   `start_all.sh` is self-contained and does not depend on the individual
+   service launcher scripts.
 
 5. **Stop All Services:**
 

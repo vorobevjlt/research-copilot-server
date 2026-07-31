@@ -1,6 +1,30 @@
-from pydantic import BaseModel, Field
+from pathlib import Path
+
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List
 from enum import Enum
+
+
+MAX_DOCUMENT_FILE_SIZE = 50 * 1024 * 1024
+DOCUMENT_MIME_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+}
+
+DOCUMENT_ACCEPTED_MIME_TYPES = {
+    ".pdf": {"application/pdf"},
+    ".docx": {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    },
+    ".pptx": {
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    },
+    ".txt": {"text/plain"},
+    ".md": {"text/markdown", "text/x-markdown", "text/plain"},
+}
 
 
 class ProjectCreate(BaseModel):
@@ -28,9 +52,52 @@ class ProjectSettings(BaseModel):
 
 
 class FileUploadRequest(BaseModel):
-    filename: str = Field(..., description="The name of the file")
-    file_type: str = Field(..., description="The type of the file")
-    file_size: int = Field(..., description="The size of the file")
+    filename: str = Field(
+        ..., min_length=1, max_length=255, description="The name of the file"
+    )
+    file_type: str = Field(
+        default="", max_length=255, description="The browser-reported MIME type"
+    )
+    file_size: int = Field(
+        ...,
+        gt=0,
+        le=MAX_DOCUMENT_FILE_SIZE,
+        description="The size of the file in bytes",
+    )
+
+    @model_validator(mode="after")
+    def validate_document(self):
+        self.filename = self.filename.strip()
+        if (
+            not self.filename
+            or Path(self.filename).name != self.filename
+            or "/" in self.filename
+            or "\\" in self.filename
+            or "\x00" in self.filename
+        ):
+            raise ValueError("filename must be a plain file name")
+
+        extension = Path(self.filename).suffix.lower()
+        if extension not in DOCUMENT_MIME_TYPES:
+            supported = ", ".join(DOCUMENT_MIME_TYPES)
+            raise ValueError(f"Unsupported file extension. Supported types: {supported}")
+
+        reported_type = self.file_type.lower().strip()
+        accepted_types = DOCUMENT_ACCEPTED_MIME_TYPES[extension]
+        if reported_type and reported_type not in accepted_types | {
+            "application/octet-stream"
+        }:
+            raise ValueError(
+                f"File type {reported_type!r} does not match the {extension} extension"
+            )
+
+        # Use a trusted, extension-derived type for the signed upload and stored record.
+        self.file_type = DOCUMENT_MIME_TYPES[extension]
+        return self
+
+
+class ConfirmFileUploadRequest(BaseModel):
+    s3_key: str = Field(..., min_length=1, max_length=1024)
 
 
 class ProcessingStatus(str, Enum):
@@ -43,6 +110,7 @@ class ProcessingStatus(str, Enum):
     SUMMARISING = "summarising"
     VECTORIZATION = "vectorization"
     COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class UrlRequest(BaseModel):

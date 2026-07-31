@@ -1,3 +1,6 @@
+import zipfile
+from pathlib import PurePosixPath
+
 from unstructured.partition.html import partition_html
 from unstructured.partition.pdf import partition_pdf
 from unstructured.partition.docx import partition_docx
@@ -7,6 +10,56 @@ from unstructured.partition.md import partition_md
 
 from src.services.llm import openAI
 from langchain_core.messages import HumanMessage
+
+
+MAX_UNCOMPRESSED_OFFICE_SIZE = 250 * 1024 * 1024
+
+
+def validate_document_content(temp_file: str, file_type: str):
+    """Reject spoofed or dangerously expanded files before document parsing."""
+    kind = (file_type or "").lower()
+
+    if kind == "pdf":
+        with open(temp_file, "rb") as document_file:
+            if b"%PDF-" not in document_file.read(1024):
+                raise ValueError("The uploaded file is not a valid PDF")
+        return
+
+    if kind in {"docx", "pptx"}:
+        if not zipfile.is_zipfile(temp_file):
+            raise ValueError(f"The uploaded file is not a valid {kind.upper()} file")
+
+        with zipfile.ZipFile(temp_file) as archive:
+            member_names = set(archive.namelist())
+            if any(
+                PurePosixPath(name).is_absolute()
+                or ".." in PurePosixPath(name).parts
+                for name in member_names
+            ):
+                raise ValueError(f"The {kind.upper()} file contains unsafe paths")
+            required_prefix = "word/" if kind == "docx" else "ppt/"
+            if "[Content_Types].xml" not in member_names or not any(
+                name.startswith(required_prefix) for name in member_names
+            ):
+                raise ValueError(
+                    f"The uploaded file is not a valid {kind.upper()} document"
+                )
+
+            uncompressed_size = sum(member.file_size for member in archive.infolist())
+            if uncompressed_size > MAX_UNCOMPRESSED_OFFICE_SIZE:
+                raise ValueError(
+                    f"The {kind.upper()} file expands beyond the safe processing limit"
+                )
+        return
+
+    if kind in {"txt", "md"}:
+        with open(temp_file, "rb") as document_file:
+            sample = document_file.read(8192)
+        if b"\x00" in sample:
+            raise ValueError("The uploaded text file contains binary data")
+        return
+
+    raise ValueError(f"Unsupported file_type: {file_type}")
 
 
 def partition_document(temp_file: str, file_type: str, source_type: str = "file"):

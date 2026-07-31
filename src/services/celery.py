@@ -16,4 +16,8 @@ def perform_rag_ingestion_task(document_id: str):
             f"Document {process_document_result['document_id']} processed successfully"
         )
     except Exception as e:
-        return f"Failed to process document {document_id}: {str(e)}"
+        # Re-raise so Celery records the task as failed; process_document has already
+        # persisted the user-visible failure status and error details.
+        raise RuntimeError(
+            f"Failed to process document {document_id}: {str(e)}"
+        ) from e

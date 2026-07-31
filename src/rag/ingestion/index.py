@@ -10,6 +10,7 @@ from src.rag.ingestion.utils import (
     separate_content_types,
     get_page_number,
     create_ai_summary,
+    validate_document_content,
 )
 from src.models.index import ProcessingStatus
 from unstructured.chunking.title import chunk_by_title
@@ -70,7 +71,9 @@ def process_document(document_id: str):
         )
 
         # Step 3 : Generate AI summaries for chunk which are Having images and tables.
-        processed_chunks = summarise_chunks(chunks, document_id)
+        processed_chunks = summarise_chunks(
+            chunks, document_id, source_type=document["source_type"]
+        )
         update_status_in_database(document_id, ProcessingStatus.VECTORIZATION)
 
         # Step 4 : Create vector embeddings (1536 dimensions per chunk).
@@ -83,7 +86,19 @@ def process_document(document_id: str):
             "document_id": document_id,
         }
     except Exception as e:
-        raise Exception(f"Failed to process document {document_id}: {str(e)}")
+        error_message = str(e)
+        try:
+            update_status_in_database(
+                document_id,
+                ProcessingStatus.FAILED,
+                {"error": {"message": error_message}},
+            )
+        except Exception:
+            # Preserve the ingestion error even if reporting that error also fails.
+            pass
+        raise Exception(
+            f"Failed to process document {document_id}: {error_message}"
+        ) from e
 
 
 def update_status_in_database(
@@ -145,11 +160,11 @@ def download_content_and_partition(document_id: str, document: dict):
     else : URL - Crawl the URL
     Partition into elements like text, tables, images, etc. and analyze the elements summary and upload to db.
     """
+    temp_file_path = None
     try:
         # Get the project document record
         document_source_type = document["source_type"]
         elements = None
-        temp_file_path = None
         if document_source_type == "file":
             # Download the file from S3
             s3_key = document["s3_key"]
@@ -160,6 +175,7 @@ def download_content_and_partition(document_id: str, document: dict):
             temp_file_path = f"/tmp/{document_id}.{file_type}"
             s3_client.download_file(appConfig["s3_bucket_name"], s3_key, temp_file_path)
 
+            validate_document_content(temp_file_path, file_type)
             elements = partition_document(temp_file_path, file_type)
 
         if document_source_type == "url":
@@ -175,15 +191,15 @@ def download_content_and_partition(document_id: str, document: dict):
 
         elements_summary = analyze_elements(elements)
 
-        # Delete the temprary file
-        os.remove(temp_file_path)
-
         return elements_summary, elements
 
     except Exception as e:
         raise Exception(
             f"Failed in Step 1 to download content and partition elements: {str(e)}"
-        )
+        ) from e
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
 
 
 def chunk_elements_by_title(elements):

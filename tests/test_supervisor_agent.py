@@ -1,0 +1,659 @@
+import unittest
+from unittest.mock import Mock, call, patch
+
+from langchain_core.language_models.fake_chat_models import (
+    FakeMessagesListChatModel,
+)
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+from src.agents.supervisor_agent import agent as supervisor_agent
+
+
+class ToolCallingFakeChatModel(FakeMessagesListChatModel):
+    """Fake chat model that supports LangChain tool binding."""
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
+class SupervisorPromptAndToolTests(unittest.TestCase):
+    def test_prompt_allows_rag_web_both_or_neither(self):
+        prompt = supervisor_agent.get_supervisor_system_prompt().lower()
+
+        self.assertIn("only `rag_search`", prompt)
+        self.assertIn("only `search_web`", prompt)
+        self.assertIn("use both tools", prompt)
+        self.assertIn("use neither tool", prompt)
+        self.assertIn("do not call a tool merely because it is available", prompt)
+        self.assertIn("separately for each topic", prompt)
+        self.assertIn("one topic cannot crowd the others out", prompt)
+        self.assertIn("invoke at least one search tool before answering", prompt)
+        self.assertIn("requires three focused `rag_search` calls", prompt)
+        self.assertIn("rendered by the user interface after the answer", prompt)
+        self.assertIn("do not add a duplicate textual `sources` section", prompt)
+
+    def test_supervisor_exposes_exactly_two_tools(self):
+        with patch.object(
+            supervisor_agent, "_create_web_search_backend", return_value=None
+        ):
+            tools = supervisor_agent.create_supervisor_tools("project-id")
+
+        self.assertEqual(
+            [tool.name for tool in tools],
+            ["rag_search", "search_web"],
+        )
+
+    def test_web_tool_returns_backend_results(self):
+        backend = Mock()
+        backend.invoke.return_value = {
+            "results": [{"title": "Result", "url": "https://example.com"}]
+        }
+
+        with patch.object(
+            supervisor_agent,
+            "_create_web_search_backend",
+            return_value=backend,
+        ):
+            web_tool = supervisor_agent.create_web_search_tool()
+            result = web_tool.func(
+                query="latest project news",
+                tool_call_id="call-web-1",
+            )
+
+        backend.invoke.assert_called_once_with(
+            {"query": "latest project news"}
+        )
+        self.assertIn(
+            "https://example.com",
+            result.update["messages"][-1].content,
+        )
+        self.assertEqual(
+            result.update["citations"],
+            [
+                {
+                    "chunk_id": None,
+                    "document_id": "https://example.com",
+                    "filename": "Result",
+                    "page": "Web",
+                    "source_type": "web",
+                    "title": "Result",
+                    "url": "https://example.com",
+                }
+            ],
+        )
+        self.assertEqual(
+            result.update["messages"][-1].artifact["citations"],
+            result.update["citations"],
+        )
+
+    def test_rag_tool_propagates_citations(self):
+        citations = [
+            {
+                "document_id": "doc-1",
+                "page": 2,
+                "filename": "guide.pdf",
+            }
+        ]
+
+        with (
+            patch.object(
+                supervisor_agent,
+                "retrieve_context",
+                return_value=(["context"], [], [], citations),
+            ),
+            patch.object(
+                supervisor_agent,
+                "prepare_prompt_and_invoke_llm",
+                return_value="Grounded answer",
+            ),
+        ):
+            rag_tool = supervisor_agent.create_rag_tool("project-id")
+            result = rag_tool.func(
+                query="What does the guide say?",
+                tool_call_id="call-1",
+            )
+
+        self.assertEqual(result.update["citations"], citations)
+        self.assertEqual(
+            result.update["messages"][-1].artifact["citations"],
+            citations,
+        )
+        self.assertEqual(
+            result.update["messages"][-1].content,
+            "Grounded answer",
+        )
+
+
+class SupervisorInputGuardrailTests(unittest.TestCase):
+    def setUp(self):
+        self.state = {
+            "messages": [HumanMessage(content="Summarize the roadmap.")]
+        }
+
+    def test_safe_input_passes_toxic_and_injection_guards(self):
+        toxic_guard = Mock()
+        injection_guard = Mock()
+        reporter = Mock()
+
+        with (
+            patch.object(
+                supervisor_agent, "input_toxic_guard", toxic_guard
+            ),
+            patch.object(
+                supervisor_agent,
+                "input_injection_guard",
+                injection_guard,
+            ),
+            patch.object(
+                supervisor_agent, "_report_guardrail_result", reporter
+            ),
+        ):
+            result = supervisor_agent.input_guardrail_node(self.state)
+
+        toxic_guard.validate.assert_called_once_with("Summarize the roadmap.")
+        injection_guard.validate.assert_called_once_with(
+            "Summarize the roadmap."
+        )
+        self.assertEqual(
+            reporter.call_args_list,
+            [
+                call("Toxic Content", "PASSED"),
+                call("Prompt Injection", "PASSED"),
+            ],
+        )
+        self.assertTrue(result["input_safe"])
+
+    def test_prompt_injection_is_blocked_before_supervisor(self):
+        toxic_guard = Mock()
+        injection_guard = Mock()
+        injection_guard.validate.side_effect = RuntimeError(
+            "injection detected"
+        )
+        reporter = Mock()
+        tool_reporter = Mock()
+
+        with (
+            patch.object(
+                supervisor_agent, "input_toxic_guard", toxic_guard
+            ),
+            patch.object(
+                supervisor_agent,
+                "input_injection_guard",
+                injection_guard,
+            ),
+            patch.object(
+                supervisor_agent, "_report_guardrail_result", reporter
+            ),
+            patch.object(
+                supervisor_agent, "_report_tool_usage", tool_reporter
+            ),
+        ):
+            result = supervisor_agent.input_guardrail_node(self.state)
+
+        tool_reporter.assert_called_once_with([])
+        self.assertFalse(result["input_safe"])
+        self.assertFalse(result["output_safe"])
+        self.assertEqual(
+            reporter.call_args_list,
+            [
+                call("Toxic Content", "PASSED"),
+                call("Prompt Injection", "BLOCKED"),
+                call("PII", "SKIPPED"),
+            ],
+        )
+
+    def test_toxic_input_skips_remaining_guards(self):
+        toxic_guard = Mock()
+        toxic_guard.validate.side_effect = RuntimeError("toxic")
+        injection_guard = Mock()
+        reporter = Mock()
+        tool_reporter = Mock()
+
+        with (
+            patch.object(
+                supervisor_agent, "input_toxic_guard", toxic_guard
+            ),
+            patch.object(
+                supervisor_agent,
+                "input_injection_guard",
+                injection_guard,
+            ),
+            patch.object(
+                supervisor_agent, "_report_guardrail_result", reporter
+            ),
+            patch.object(
+                supervisor_agent, "_report_tool_usage", tool_reporter
+            ),
+        ):
+            result = supervisor_agent.input_guardrail_node(self.state)
+
+        tool_reporter.assert_called_once_with([])
+        self.assertFalse(result["input_safe"])
+        injection_guard.validate.assert_not_called()
+        self.assertEqual(
+            reporter.call_args_list,
+            [
+                call("Toxic Content", "BLOCKED"),
+                call("Prompt Injection", "SKIPPED"),
+                call("PII", "SKIPPED"),
+            ],
+        )
+
+
+class SupervisorOutputGuardrailTests(unittest.TestCase):
+    def setUp(self):
+        self.state = {
+            "messages": [HumanMessage(content="A safe final answer.")],
+            "input_safe": True,
+        }
+
+    def test_safe_output_passes_pii_guard(self):
+        pii_guard = Mock()
+        reporter = Mock()
+
+        with (
+            patch.object(supervisor_agent, "output_guard", pii_guard),
+            patch.object(
+                supervisor_agent, "_report_guardrail_result", reporter
+            ),
+        ):
+            result = supervisor_agent.output_guardrail_node(self.state)
+
+        pii_guard.validate.assert_called_once_with("A safe final answer.")
+        reporter.assert_called_once_with("PII", "PASSED")
+        self.assertTrue(result["output_safe"])
+        self.assertEqual(result["final_response"], "A safe final answer.")
+
+    def test_pii_output_is_replaced(self):
+        pii_guard = Mock()
+        pii_guard.validate.side_effect = RuntimeError("PII detected")
+        reporter = Mock()
+
+        with (
+            patch.object(supervisor_agent, "output_guard", pii_guard),
+            patch.object(
+                supervisor_agent, "_report_guardrail_result", reporter
+            ),
+        ):
+            result = supervisor_agent.output_guardrail_node(self.state)
+
+        reporter.assert_called_once_with("PII", "BLOCKED")
+        self.assertFalse(result["output_safe"])
+        self.assertNotEqual(
+            result["messages"][-1].content,
+            "A safe final answer.",
+        )
+
+
+class SupervisorSourceIntegrationTests(unittest.TestCase):
+    def test_multi_topic_rag_sources_are_combined_for_the_ui(self):
+        model = ToolCallingFakeChatModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "rag_search",
+                            "args": {"query": "scaled dot-product attention formula"},
+                            "id": "attention-call",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "rag_search",
+                            "args": {
+                                "query": (
+                                    "neural network layers weights learning "
+                                    "convolution classification"
+                                )
+                            },
+                            "id": "network-call",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "rag_search",
+                            "args": {"query": "human long-term memory brain"},
+                            "id": "memory-call",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                AIMessage(content="A combined three-part answer."),
+            ]
+        )
+        citations_by_query = {
+            "scaled dot-product attention formula": [
+                {
+                    "document_id": "attention-doc",
+                    "filename": "attention.pdf",
+                    "page": 3,
+                }
+            ],
+            "neural network layers weights learning convolution classification": [
+                {
+                    "document_id": "network-doc",
+                    "filename": "neural-networks.pdf",
+                    "page": 4,
+                }
+            ],
+            "human long-term memory brain": [
+                {
+                    "document_id": "memory-doc",
+                    "filename": "neuroscience.txt",
+                    "page": 6,
+                }
+            ],
+        }
+
+        def retrieve_for_topic(_project_id, query):
+            return (["context"], [], [], citations_by_query[query])
+
+        with (
+            patch.object(supervisor_agent, "input_toxic_guard", Mock()),
+            patch.object(
+                supervisor_agent, "input_injection_guard", Mock()
+            ),
+            patch.object(supervisor_agent, "output_guard", Mock()),
+            patch.object(
+                supervisor_agent,
+                "_create_web_search_backend",
+                return_value=None,
+            ),
+            patch.object(
+                supervisor_agent,
+                "retrieve_context",
+                side_effect=retrieve_for_topic,
+            ),
+            patch.object(
+                supervisor_agent,
+                "prepare_prompt_and_invoke_llm",
+                return_value="Grounded topic answer",
+            ),
+            patch.object(supervisor_agent, "_report_guardrail_result"),
+            patch.object(supervisor_agent, "_report_tool_usage"),
+        ):
+            agent = supervisor_agent.create_supervisor_agent(
+                "project-id", model=model
+            )
+            result = agent.invoke(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": (
+                                "Give me the attention formula, neural-network "
+                                "idea, and human long-term memory."
+                            ),
+                        }
+                    ]
+                }
+            )
+
+        self.assertEqual(
+            [citation["filename"] for citation in result["citations"]],
+            ["attention.pdf", "neural-networks.pdf", "neuroscience.txt"],
+        )
+
+    def test_rag_sources_survive_after_the_final_answer(self):
+        model = ToolCallingFakeChatModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "rag_search",
+                            "args": {"query": "roadmap"},
+                            "id": "rag-call",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="The roadmap has three stages."),
+            ]
+        )
+        citations = [
+            {
+                "document_id": "doc-1",
+                "filename": "roadmap.pdf",
+                "page": 2,
+            }
+        ]
+
+        with (
+            patch.object(supervisor_agent, "input_toxic_guard", Mock()),
+            patch.object(
+                supervisor_agent, "input_injection_guard", Mock()
+            ),
+            patch.object(supervisor_agent, "output_guard", Mock()),
+            patch.object(
+                supervisor_agent,
+                "_create_web_search_backend",
+                return_value=None,
+            ),
+            patch.object(
+                supervisor_agent,
+                "retrieve_context",
+                return_value=(["context"], [], [], citations),
+            ),
+            patch.object(
+                supervisor_agent,
+                "prepare_prompt_and_invoke_llm",
+                return_value="Grounded evidence",
+            ),
+            patch.object(supervisor_agent, "_report_guardrail_result"),
+            patch.object(supervisor_agent, "_report_tool_usage"),
+        ):
+            agent = supervisor_agent.create_supervisor_agent(
+                "project-id", model=model
+            )
+            result = agent.invoke(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "What is the roadmap?",
+                        }
+                    ]
+                }
+            )
+
+        self.assertEqual(
+            result["messages"][-1].content,
+            "The roadmap has three stages.",
+        )
+        self.assertEqual(result["citations"], citations)
+
+    def test_web_sources_survive_after_the_final_answer(self):
+        model = ToolCallingFakeChatModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "search_web",
+                            "args": {"query": "latest roadmap news"},
+                            "id": "web-call",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="The latest public update is available."),
+            ]
+        )
+        backend = Mock()
+        backend.invoke.return_value = {
+            "results": [
+                {
+                    "title": "Public roadmap update",
+                    "url": "https://example.com/roadmap",
+                }
+            ]
+        }
+
+        with (
+            patch.object(supervisor_agent, "input_toxic_guard", Mock()),
+            patch.object(
+                supervisor_agent, "input_injection_guard", Mock()
+            ),
+            patch.object(supervisor_agent, "output_guard", Mock()),
+            patch.object(
+                supervisor_agent,
+                "_create_web_search_backend",
+                return_value=backend,
+            ),
+            patch.object(supervisor_agent, "_report_guardrail_result"),
+            patch.object(supervisor_agent, "_report_tool_usage"),
+        ):
+            agent = supervisor_agent.create_supervisor_agent(
+                "project-id", model=model
+            )
+            result = agent.invoke(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "What is the latest roadmap news?",
+                        }
+                    ]
+                }
+            )
+
+        self.assertEqual(
+            result["messages"][-1].content,
+            "The latest public update is available.",
+        )
+        self.assertEqual(
+            result["citations"][0]["url"],
+            "https://example.com/roadmap",
+        )
+
+
+class SupervisorCitationTests(unittest.TestCase):
+    def test_citations_are_deduplicated_by_document_and_page(self):
+        current = [{"document_id": "doc-1", "page": 1}]
+        incoming = [
+            {"document_id": "doc-1", "page": 1},
+            {"document_id": "doc-1", "page": 2},
+        ]
+
+        self.assertEqual(
+            supervisor_agent.merge_citations(current, incoming),
+            [
+                {"document_id": "doc-1", "page": 1},
+                {"document_id": "doc-1", "page": 2},
+            ],
+        )
+
+    def test_web_citations_are_deduplicated_by_url(self):
+        current = [
+            {
+                "source_type": "web",
+                "url": "https://example.com/a",
+                "filename": "Example A",
+            }
+        ]
+        incoming = [
+            {
+                "source_type": "web",
+                "url": "https://example.com/a",
+                "filename": "Duplicate",
+            },
+            {
+                "source_type": "web",
+                "url": "https://example.com/b",
+                "filename": "Example B",
+            },
+        ]
+
+        self.assertEqual(
+            supervisor_agent.merge_citations(current, incoming),
+            [
+                current[0],
+                incoming[1],
+            ],
+        )
+
+
+class SupervisorToolUsageTests(unittest.TestCase):
+    def test_reports_tools_in_invocation_order(self):
+        messages = [
+            HumanMessage(content="Compare internal and external information."),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "rag_search",
+                        "args": {"query": "internal"},
+                        "id": "rag-call",
+                        "type": "tool_call",
+                    },
+                    {
+                        "name": "search_web",
+                        "args": {"query": "external"},
+                        "id": "web-call",
+                        "type": "tool_call",
+                    },
+                ],
+            ),
+        ]
+        reporter = Mock()
+
+        with patch.object(
+            supervisor_agent, "_report_tool_usage", reporter
+        ):
+            result = supervisor_agent.tool_usage_node(
+                {"messages": messages}
+            )
+
+        reporter.assert_called_once_with(["rag_search", "search_web"])
+        self.assertEqual(
+            result["tools_used"],
+            ["rag_search", "search_web"],
+        )
+
+    def test_recovers_sources_from_tool_messages(self):
+        citations = [
+            {
+                "document_id": "doc-1",
+                "filename": "roadmap.pdf",
+                "page": 2,
+            }
+        ]
+        messages = [
+            HumanMessage(content="What is the roadmap?"),
+            ToolMessage(
+                content="Grounded evidence",
+                tool_call_id="rag-call",
+                artifact={"citations": citations},
+            ),
+            AIMessage(content="The roadmap has three stages."),
+        ]
+
+        with patch.object(supervisor_agent, "_report_tool_usage"):
+            result = supervisor_agent.tool_usage_node(
+                {"messages": messages}
+            )
+
+        self.assertEqual(result["citations"], citations)
+
+    def test_reports_none_when_no_tool_was_needed(self):
+        reporter = Mock()
+
+        with patch.object(
+            supervisor_agent, "_report_tool_usage", reporter
+        ):
+            result = supervisor_agent.tool_usage_node(
+                {
+                    "messages": [
+                        HumanMessage(content="Hello"),
+                        AIMessage(content="Hello!"),
+                    ]
+                }
+            )
+
+        reporter.assert_called_once_with([])
+        self.assertEqual(result["tools_used"], [])
+        self.assertEqual(result["citations"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()
