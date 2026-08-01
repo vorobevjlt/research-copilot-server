@@ -33,6 +33,19 @@
 
    Then update the values in `.env` file with your configuration.
 
+   Agentic projects can use ScrapingBee's Remote MCP server. Add:
+
+   ```bash
+   SCRAPINGBEE_API_KEY=your_api_key
+   ```
+
+   The supervisor loads these MCP tools lazily on the first agentic chat
+   request: `fast_search`, `get_page_text`, `extract_page_data`, and
+   `get_screenshot`. The API key is URL-encoded at runtime and is never stored
+   in source-controlled MCP configuration. If the remote MCP server is
+   unavailable, the supervisor keeps its existing RAG, saved-website scraper,
+   and fallback web-search tools.
+
    > 💡 **Tip:** Get your Supabase credentials by running `npx supabase status` after starting Supabase locally.
    >
    > ⚠️ **Note:** Supabase has updated their naming. The old variable `service_role key` is now simply called `Secret Key`.

@@ -6,6 +6,7 @@ from src.models.index import MessageCreate, MessageRole
 from typing import Dict, List
 from src.agents.simple_agent.agent import create_simple_rag_agent
 from src.agents.supervisor_agent.agent import create_supervisor_agent
+from src.services.scrapingbee_mcp import get_scrapingbee_mcp_tools
 
 router = APIRouter(tags=["projectRoutes"])
 """
@@ -468,17 +469,21 @@ async def send_message(
         if agent_type == "simple":
             agent = create_simple_rag_agent(
                 project_id=project_id,
-                chat_history=chat_history
+                chat_history=chat_history,
+            )
+            result = agent.invoke(
+                {"messages": [{"role": "user", "content": message_content}]}
             )
         elif agent_type == "agentic":
+            scrapingbee_mcp_tools = await get_scrapingbee_mcp_tools()
             agent = create_supervisor_agent(
                 project_id=project_id,
-                chat_history=chat_history
+                chat_history=chat_history,
+                mcp_tools=scrapingbee_mcp_tools,
             )
-
-        result = agent.invoke(
-            {"messages": [{"role": "user", "content": message_content}]}
-        )
+            result = await agent.ainvoke(
+                {"messages": [{"role": "user", "content": message_content}]}
+            )
 
         final_response = str(result["messages"][-1].text)
         citations = result.get("citations", [])

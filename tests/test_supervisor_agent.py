@@ -17,31 +17,158 @@ class ToolCallingFakeChatModel(FakeMessagesListChatModel):
 
 
 class SupervisorPromptAndToolTests(unittest.TestCase):
-    def test_prompt_allows_rag_web_both_or_neither(self):
-        prompt = supervisor_agent.get_supervisor_system_prompt().lower()
+    def test_prompt_routes_matching_saved_websites_to_scrapingbee(self):
+        prompt = supervisor_agent.get_supervisor_system_prompt(
+            website_sources=[
+                {"source_url": "https://rentals.example/listings"}
+            ]
+        ).lower()
 
         self.assertIn("only `rag_search`", prompt)
+        self.assertIn("`scrape_project_website`", prompt)
         self.assertIn("only `search_web`", prompt)
-        self.assertIn("use both tools", prompt)
+        self.assertIn("must call `scrape_project_website`", prompt)
+        self.assertIn("prefer `scrape_project_website`", prompt)
+        self.assertIn("https://rentals.example/listings", prompt)
         self.assertIn("use neither tool", prompt)
         self.assertIn("do not call a tool merely because it is available", prompt)
         self.assertIn("separately for each topic", prompt)
         self.assertIn("one topic cannot crowd the others out", prompt)
-        self.assertIn("invoke at least one search tool before answering", prompt)
+        self.assertIn("invoke at least one evidence tool before answering", prompt)
         self.assertIn("requires three focused `rag_search` calls", prompt)
         self.assertIn("rendered by the user interface after the answer", prompt)
         self.assertIn("do not add a duplicate textual `sources` section", prompt)
 
-    def test_supervisor_exposes_exactly_two_tools(self):
+    def test_supervisor_exposes_exactly_three_tools(self):
         with patch.object(
             supervisor_agent, "_create_web_search_backend", return_value=None
         ):
-            tools = supervisor_agent.create_supervisor_tools("project-id")
+            tools = supervisor_agent.create_supervisor_tools(
+                "project-id",
+                website_sources=[],
+            )
 
         self.assertEqual(
             [tool.name for tool in tools],
-            ["rag_search", "search_web"],
+            ["rag_search", "scrape_project_website", "search_web"],
         )
+
+    def test_supervisor_appends_scrapingbee_mcp_tools(self):
+        fast_search = Mock()
+        fast_search.name = "fast_search"
+        page_text = Mock()
+        page_text.name = "get_page_text"
+
+        with patch.object(
+            supervisor_agent, "_create_web_search_backend", return_value=None
+        ):
+            tools = supervisor_agent.create_supervisor_tools(
+                "project-id",
+                website_sources=[],
+                mcp_tools=[fast_search, page_text],
+            )
+
+        self.assertEqual(
+            [tool.name for tool in tools],
+            [
+                "rag_search",
+                "scrape_project_website",
+                "search_web",
+                "fast_search",
+                "get_page_text",
+            ],
+        )
+
+    def test_prompt_identifies_bound_scrapingbee_mcp_tools(self):
+        fast_search = Mock()
+        fast_search.name = "fast_search"
+        page_text = Mock()
+        page_text.name = "get_page_text"
+
+        prompt = supervisor_agent.get_supervisor_system_prompt(
+            website_sources=[],
+            mcp_tools=[fast_search, page_text],
+        ).lower()
+
+        self.assertIn("scrapingbee mcp tools available", prompt)
+        self.assertIn("fast_search", prompt)
+        self.assertIn("get_page_text", prompt)
+        self.assertIn("use `fast_search` first", prompt)
+
+    def test_scrapingbee_tool_fetches_only_the_matching_saved_website(self):
+        response = Mock()
+        response.text = "<html><body><h1>Apartment A</h1></body></html>"
+        saved_source = {
+            "id": "website-document-1",
+            "filename": "https://rentals.example/listings",
+            "source_url": "https://rentals.example/listings",
+        }
+
+        with patch.object(
+            supervisor_agent.scrapingbee_client,
+            "html_api",
+            return_value=response,
+        ) as scrape:
+            scrape_tool = supervisor_agent.create_project_website_scraping_tool(
+                "project-id",
+                website_sources=[saved_source],
+            )
+            result = scrape_tool.func(
+                url="rentals.example",
+                tool_call_id="call-scrape-1",
+            )
+
+        scrape.assert_called_once_with(
+            "https://rentals.example/listings",
+            params={"render_js": True},
+        )
+        response.raise_for_status.assert_called_once_with()
+        self.assertIn("Apartment A", result.update["messages"][-1].content)
+        self.assertEqual(
+            result.update["citations"],
+            [
+                {
+                    "chunk_id": None,
+                    "document_id": "website-document-1",
+                    "filename": "https://rentals.example/listings",
+                    "page": "Live",
+                    "source_type": "project_website",
+                    "title": "https://rentals.example/listings",
+                    "url": "https://rentals.example/listings",
+                }
+            ],
+        )
+        self.assertEqual(
+            result.update["messages"][-1].artifact["citations"],
+            result.update["citations"],
+        )
+
+    def test_scrapingbee_tool_rejects_a_website_not_saved_in_project(self):
+        with patch.object(
+            supervisor_agent.scrapingbee_client,
+            "html_api",
+        ) as scrape:
+            scrape_tool = supervisor_agent.create_project_website_scraping_tool(
+                "project-id",
+                website_sources=[
+                    {
+                        "id": "website-document-1",
+                        "filename": "https://rentals.example/listings",
+                        "source_url": "https://rentals.example/listings",
+                    }
+                ],
+            )
+            result = scrape_tool.func(
+                url="https://unrelated.example/listings",
+                tool_call_id="call-scrape-2",
+            )
+
+        scrape.assert_not_called()
+        self.assertIn(
+            "does not uniquely match",
+            result.update["messages"][-1].content,
+        )
+        self.assertNotIn("citations", result.update)
 
     def test_web_tool_returns_backend_results(self):
         backend = Mock()
@@ -372,7 +499,7 @@ class SupervisorSourceIntegrationTests(unittest.TestCase):
             patch.object(supervisor_agent, "_report_tool_usage"),
         ):
             agent = supervisor_agent.create_supervisor_agent(
-                "project-id", model=model
+                "project-id", model=model, website_sources=[]
             )
             result = agent.invoke(
                 {
@@ -443,7 +570,7 @@ class SupervisorSourceIntegrationTests(unittest.TestCase):
             patch.object(supervisor_agent, "_report_tool_usage"),
         ):
             agent = supervisor_agent.create_supervisor_agent(
-                "project-id", model=model
+                "project-id", model=model, website_sources=[]
             )
             result = agent.invoke(
                 {
@@ -504,7 +631,7 @@ class SupervisorSourceIntegrationTests(unittest.TestCase):
             patch.object(supervisor_agent, "_report_tool_usage"),
         ):
             agent = supervisor_agent.create_supervisor_agent(
-                "project-id", model=model
+                "project-id", model=model, website_sources=[]
             )
             result = agent.invoke(
                 {
@@ -524,6 +651,82 @@ class SupervisorSourceIntegrationTests(unittest.TestCase):
         self.assertEqual(
             result["citations"][0]["url"],
             "https://example.com/roadmap",
+        )
+
+    def test_saved_website_scrape_sources_survive_after_the_final_answer(self):
+        saved_source = {
+            "id": "website-document-1",
+            "filename": "https://rentals.example/listings",
+            "source_url": "https://rentals.example/listings",
+        }
+        model = ToolCallingFakeChatModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "scrape_project_website",
+                            "args": {
+                                "url": "https://rentals.example/listings"
+                            },
+                            "id": "scrape-call",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="The saved website has a current listing."),
+            ]
+        )
+        response = Mock()
+        response.text = "<html><body>Current apartment listing</body></html>"
+
+        with (
+            patch.object(supervisor_agent, "input_toxic_guard", Mock()),
+            patch.object(
+                supervisor_agent, "input_injection_guard", Mock()
+            ),
+            patch.object(supervisor_agent, "output_guard", Mock()),
+            patch.object(
+                supervisor_agent,
+                "_create_web_search_backend",
+                return_value=None,
+            ),
+            patch.object(
+                supervisor_agent.scrapingbee_client,
+                "html_api",
+                return_value=response,
+            ) as scrape,
+            patch.object(supervisor_agent, "_report_guardrail_result"),
+            patch.object(supervisor_agent, "_report_tool_usage"),
+        ):
+            agent = supervisor_agent.create_supervisor_agent(
+                "project-id",
+                model=model,
+                website_sources=[saved_source],
+            )
+            result = agent.invoke(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "Find a current apartment listing.",
+                        }
+                    ]
+                }
+            )
+
+        scrape.assert_called_once_with(
+            "https://rentals.example/listings",
+            params={"render_js": True},
+        )
+        self.assertEqual(
+            result["messages"][-1].content,
+            "The saved website has a current listing.",
+        )
+        self.assertEqual(result["citations"][0]["source_type"], "project_website")
+        self.assertEqual(
+            result["citations"][0]["url"],
+            "https://rentals.example/listings",
         )
 
 
@@ -634,6 +837,83 @@ class SupervisorToolUsageTests(unittest.TestCase):
             )
 
         self.assertEqual(result["citations"], citations)
+
+    def test_recovers_scrapingbee_mcp_search_sources(self):
+        messages = [
+            HumanMessage(content="Find Berlin apartment listings."),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "fast_search",
+                        "args": {"search": "Berlin apartments"},
+                        "id": "mcp-search-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            ToolMessage(
+                content="Search completed",
+                name="fast_search",
+                tool_call_id="mcp-search-call",
+                artifact={
+                    "structured_content": {
+                        "organic": [
+                            {
+                                "title": "Berlin rentals",
+                                "link": "https://rentals.example/berlin",
+                            }
+                        ]
+                    }
+                },
+            ),
+            AIMessage(content="I found one relevant rental source."),
+        ]
+
+        with patch.object(supervisor_agent, "_report_tool_usage"):
+            result = supervisor_agent.tool_usage_node({"messages": messages})
+
+        self.assertEqual(
+            result["citations"],
+            [
+                {
+                    "chunk_id": None,
+                    "document_id": "https://rentals.example/berlin",
+                    "filename": "Berlin rentals",
+                    "page": "Web",
+                    "source_type": "web",
+                    "title": "Berlin rentals",
+                    "url": "https://rentals.example/berlin",
+                }
+            ],
+        )
+
+    def test_recovers_scrapingbee_mcp_page_url_from_tool_arguments(self):
+        source_url = "https://rentals.example/listing/123"
+        messages = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_page_text",
+                        "args": {"url": source_url},
+                        "id": "mcp-page-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            ToolMessage(
+                content="Apartment details",
+                name="get_page_text",
+                tool_call_id="mcp-page-call",
+            ),
+        ]
+
+        with patch.object(supervisor_agent, "_report_tool_usage"):
+            result = supervisor_agent.tool_usage_node({"messages": messages})
+
+        self.assertEqual(result["citations"][0]["url"], source_url)
+        self.assertEqual(result["citations"][0]["source_type"], "web")
 
     def test_reports_none_when_no_tool_was_needed(self):
         reporter = Mock()
