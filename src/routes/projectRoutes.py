@@ -8,6 +8,8 @@ from src.agents.simple_agent.agent import create_simple_rag_agent
 from src.agents.supervisor_agent.agent import create_supervisor_agent
 from src.services.scrapingbee_mcp import get_scrapingbee_mcp_tools
 
+
+
 router = APIRouter(tags=["projectRoutes"])
 """
 `/api/projects`

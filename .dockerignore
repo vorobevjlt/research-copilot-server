@@ -1,0 +1,13 @@
+.env
+.venv/
+.git/
+__pycache__/
+*.py[cod]
+logs/
+.pytest_cache/
+.coverage
+notebook/
+evaluation/
+tests/
+nootbook/
+redis/

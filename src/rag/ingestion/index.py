@@ -18,15 +18,6 @@ from src.services.webScrapper import scrapingbee_client
 
 
 def process_document(document_id: str):
-    """
-    * Step 1 : Download from S3 (file) or Crawl the URL (url) and Extract text, tables, and images from the PDF (using Unstructured Library) from the AWS S3 document.
-    * Step 2 : Split the extracted content into chunks.
-    * Step 3 : Generate AI summaries for each chunk.
-    * Step 4 : Create vector embeddings of chunk and store in PostgreSQL.
-    * Update the project document record with the processing_status and processing_details as needed.
-    *   - `processing_details` : What type of elements or metadata did we retrieve from the document to show in the UI.
-    """
-
     try:
         update_status_in_database(document_id, ProcessingStatus.PROCESSING)
 
@@ -104,9 +95,6 @@ def process_document(document_id: str):
 def update_status_in_database(
     document_id: str, status: ProcessingStatus, details: dict = None
 ):
-    """
-    Update the project document record with the new status and details.
-    """
     try:
         # Get the project document record
         document_result = (
@@ -154,12 +142,6 @@ def update_status_in_database(
 
 
 def download_content_and_partition(document_id: str, document: dict):
-    """
-    Content either a file or a url.
-    if :  Document - Download from S3
-    else : URL - Crawl the URL
-    Partition into elements like text, tables, images, etc. and analyze the elements summary and upload to db.
-    """
     temp_file_path = None
     try:
         # Get the project document record
@@ -222,12 +204,6 @@ def chunk_elements_by_title(elements):
 
 
 def summarise_chunks(chunks, document_id, source_type="file"):
-    """
-    Create user-friendly, searchable chunks.
-
-    For each chunk we optionally generate an AI summary (useful for mixed content like
-    tables/images) and update the UI to better UX as each chunk will take at least 5 seconds to process.
-    """
 
     try:
         processed_chunks = []
@@ -248,13 +224,6 @@ def summarise_chunks(chunks, document_id, source_type="file"):
                 },
             )
 
-            # Normalize the raw chunk into typed content buckets (text/tables/images, etc.).
-            # content_data = {
-            #     "text": "This is the main text content of the chunk...",
-            #     "tables": ["<table><tr><th>Header</th></tr><tr><td>Data</td></tr></table>"],
-            #     "images": ["iVBORw0KGgoAAAANSUhEUgAA..."],  # base64 encoded image strings
-            #     "types": ["text", "table", "image"]  # or ["text"], ["text", "table"], etc.
-            # }
             content_data = separate_content_types(chunk, source_type)
 
             # * Use AI summarization only when the chunk contains at least one table or image.
@@ -281,19 +250,6 @@ def summarise_chunks(chunks, document_id, source_type="file"):
                 "char_count": len(enhanced_content),
             }
 
-            # Rough example for processed_chunk:
-            # {
-            #     "content": "AI-enhanced summary of the chunk... Image looks like this: <image_base64> ... Table looks like this: <table_html> ...",
-            #     "original_content": {
-            #         "text": "Full paragraph of the chunk...",
-            #         "tables": ["<table><tr><th>Region</th><th>Revenue</th></tr><tr><td>APAC</td><td>$1.2M</td></tr></table>"],
-            #         "images": ["iVBORw0KGgoAAA...base64..."]
-            #     },
-            #     "type": ["text", "table", "image"],
-            #     "page_number": 3,
-            #     "char_count": 142
-            # }
-
             processed_chunks.append(processed_chunk)
 
         return processed_chunks
@@ -302,19 +258,8 @@ def summarise_chunks(chunks, document_id, source_type="file"):
 
 
 def vectorize_chunks_summary_and_store_in_database(processed_chunks, document_id):
-    """Generate vector embeddings of the ai-summary of the chunks and store in the database."""
 
     try:
-        # processed_chunks example (list of dicts):
-
-        # processed chunks = [{
-        #     "content": "Ai-enhanced summary of the chunk...", <----- **This is the content that will be vectorized.**
-        #     "original_content": {"text": "...", "tables": ["<table...>"], "images": ["<base64>"]},
-        #     "type": ["text", "table", "image"],
-        #     "page_number": 3,
-        #     "char_count": 142
-        # }, {....}]
-        # Step 1 : Vectorizing Chunks
         ai_summary_list = [chunk["content"] for chunk in processed_chunks]
         # ai_summary_list = ["Ai-enhanced summary of the chunk...", "Ai-enhanced summary of the chunk...", ...]
 
@@ -344,27 +289,10 @@ def vectorize_chunks_summary_and_store_in_database(processed_chunks, document_id
                         raise e
                     time.sleep(2**attempt)
 
-        # Step 2 : Storing Chunks with Embeddings
-        # chunk_embedding_pairs: list of tuples (processed_chunk, embedding_vector)
-        # Example:
-        # [
-        #     ({"content": "...", "page_number": 1, "type": ["text"]}, [0.123, -0.456, 0.789, ...]),
-        #     ({"content": "...", "page_number": 2, "type": ["text", "table"]}, [0.234, -0.567, 0.890, ...]),
-        #     ...
-        # ]
         chunk_embedding_pairs = list(zip(processed_chunks, all_vectorized_embeddings))
         stored_chunk_ids = []
 
         for i, (processed_chunk, embedding_vector) in enumerate(chunk_embedding_pairs):
-            # Add document_id, chunk_index, and embedding to each processed_chunk
-            # chunk_data_with_embedding example:
-            # {
-            #     * Same as above but added document_id, chunk_index, and embedding.
-            #     "content": "AI-enhanced summary of the chunk...","original_content": {"text": "...", "tables": ["<table>...</table>"], "images": ["<base64>"]},"type": ["text", "table", "image"],"page_number": 3,"char_count": 142,
-            #     "document_id": "doc_123",
-            #     "chunk_index": 0,
-            #     "embedding": [0.123, -0.456, 0.789, 0.234, ...]  # 1536 dimensions
-            # }
             chunk_data_with_embedding = {
                 **processed_chunk,
                 "document_id": document_id,

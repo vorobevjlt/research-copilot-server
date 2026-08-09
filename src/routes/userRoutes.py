@@ -21,11 +21,6 @@ async def create_user(clerk_webhook_data: dict):
 
     """
     try:
-        # Validate webhook payload structure
-        if not isinstance(clerk_webhook_data, dict):
-            raise HTTPException(
-                status_code=400, detail="Invalid webhook payload format"
-            )
 
         # Check event type
         event_type = clerk_webhook_data.get("type")

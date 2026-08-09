@@ -12,8 +12,8 @@ RETURNS TABLE(
     created_at timestamp with time zone,
     page_number integer,
     char_count integer,
-    type jsonb,
-    original_content jsonb,
+    type json,
+    original_content json,
     embedding vector
 )
 LANGUAGE sql
@@ -63,8 +63,8 @@ RETURNS TABLE(
     created_at timestamp with time zone,
     page_number integer,
     char_count integer,
-    type jsonb,
-    original_content jsonb,
+    type json,
+    original_content json,
     embedding vector
 )
 LANGUAGE sql

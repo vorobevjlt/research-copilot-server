@@ -255,7 +255,7 @@ def create_ai_summary(text, tables_html, images_base64):
             # print(f"🖼️ Image {i+1} included in summary request")
 
         message = HumanMessage(content=message_content)
-        response = openAI["embeddings_llm"].invoke([message])
+        response = openAI["chat_llm"].invoke([message])
 
         return response.content
 
