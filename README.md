@@ -53,31 +53,24 @@
 
 4. **Start All Services:**
 
-   Start Redis, the API server, and the Celery worker with one command:
+   Build and start Redis, the API server, and the Celery worker with Docker
+   Compose:
 
    ```bash
-   ./start_all.sh
+   docker compose up --build
    ```
 
-   On the first launch, the script runs
-   `.venv/bin/guardrails configure --disable-metrics` if Guardrails telemetry
-   has not already been disabled.
-
-   The server will run on `http://localhost:8000`. Press `Ctrl+C` to stop all
-   services started by the launcher.
-
-   `start_all.sh` is self-contained and does not depend on the individual
-   service launcher scripts.
+   The server will run on `http://localhost:8000`.
 
 5. **Stop All Services:**
 
    To stop everything at once:
 
    ```bash
-   sh stopAll.sh
+   docker compose down
    ```
 
-   This stops: Celery Worker, Redis Server, and API Server
+   This stops the Celery worker, Redis server, and API server containers.
 
 ### Summary
 

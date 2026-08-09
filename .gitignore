@@ -10,8 +10,4 @@ __pycache__/
 .ipynb_checkpoints/
 logs/
 notebook/
-nootbook/
 tests/
-start.sh
-stopAll.sh
-restart-containers.sh
