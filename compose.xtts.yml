@@ -15,6 +15,21 @@ services:
       - xtts-models:/data/models
       - xtts-voices:/data/voices
 
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    depends_on:
+      - xtts
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.xtts:/etc/caddy/Caddyfile:ro
+      - xtts-caddy-data:/data
+      - xtts-caddy-config:/config
+
 volumes:
   xtts-models:
   xtts-voices:
+  xtts-caddy-data:
+  xtts-caddy-config:

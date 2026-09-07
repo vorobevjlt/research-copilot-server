@@ -1,0 +1,8 @@
+{
+	admin off
+}
+
+xtts.161.104.50.218.sslip.io {
+	encode zstd gzip
+	reverse_proxy xtts:8000
+}
