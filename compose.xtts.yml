@@ -9,11 +9,13 @@ services:
     environment:
       COQUI_TOS_AGREED: ${COQUI_TOS_AGREED:?Review the XTTS-v2 CPML license and set COQUI_TOS_AGREED=1}
       XTTS_DEVICE: ${XTTS_DEVICE:-cpu}
-      XTTS_PRELOAD_MODEL: "true"
+      XTTS_PRELOAD_MODEL: "false"
       XTTS_SERVICE_API_KEY: ${XTTS_SERVICE_API_KEY:?Set XTTS_SERVICE_API_KEY}
+      XTTS_ALLOWED_ORIGINS: ${XTTS_ALLOWED_ORIGINS:-https://research-copilot-iota.vercel.app,http://localhost:3000}
     volumes:
       - xtts-models:/data/models
       - xtts-voices:/data/voices
+      - xtts-song-jobs:/data/song-jobs
 
   caddy:
     image: caddy:2.10.2-alpine
@@ -31,5 +33,6 @@ services:
 volumes:
   xtts-models:
   xtts-voices:
+  xtts-song-jobs:
   xtts-caddy-data:
   xtts-caddy-config:

@@ -24,9 +24,11 @@ RUN python -m pip install --no-cache-dir \
     && python -m pip install --no-cache-dir -r requirements.txt
 
 COPY app.py ./
+COPY song_convert.py ./
+COPY speech_convert.py ./
 
 RUN useradd --create-home --uid 10001 xtts \
-    && mkdir -p /data/models /data/voices \
+    && mkdir -p /data/models /data/voices /data/song-jobs \
     && chown -R xtts:xtts /data /app
 
 USER xtts
