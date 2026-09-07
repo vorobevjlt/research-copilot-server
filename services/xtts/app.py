@@ -225,6 +225,14 @@ def voice_path(user_id: str, voice_id: str) -> Path:
     return user_voice_dir(user_id) / f"{voice_id}.wav"
 
 
+def inference_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.setdefault("MALLOC_ARENA_MAX", "2")
+    environment.setdefault("OMP_NUM_THREADS", "2")
+    environment.setdefault("MKL_NUM_THREADS", "2")
+    return environment
+
+
 async def save_upload(upload: UploadFile, destination: Path) -> int:
     size = 0
     with destination.open("wb") as output:
@@ -346,6 +354,7 @@ def synthesize(request: SpeechRequest, reference_path: Path, output_path: Path) 
                 input=request.text.encode("utf-8"),
                 capture_output=True,
                 check=False,
+                env=inference_environment(),
                 timeout=3600,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as error:
@@ -415,6 +424,7 @@ def run_audio_command(
             arguments,
             capture_output=True,
             check=False,
+            env=inference_environment(),
             timeout=timeout,
         )
     except FileNotFoundError as error:
@@ -426,6 +436,8 @@ def run_audio_command(
         detail = completed.stderr.decode("utf-8", errors="replace").strip()
         if detail:
             LOGGER.error("Song command failed: %s", detail[-2000:])
+        else:
+            LOGGER.error("Song command exited with code %s", completed.returncode)
         raise SongConversionError(failure_message)
 
 

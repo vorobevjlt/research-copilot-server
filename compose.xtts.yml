@@ -12,6 +12,9 @@ services:
       XTTS_PRELOAD_MODEL: "false"
       XTTS_SERVICE_API_KEY: ${XTTS_SERVICE_API_KEY:?Set XTTS_SERVICE_API_KEY}
       XTTS_ALLOWED_ORIGINS: ${XTTS_ALLOWED_ORIGINS:-https://research-copilot-iota.vercel.app,http://localhost:3000}
+      MALLOC_ARENA_MAX: "2"
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
     volumes:
       - xtts-models:/data/models
       - xtts-voices:/data/voices
